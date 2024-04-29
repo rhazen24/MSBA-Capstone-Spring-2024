@@ -1,0 +1,212 @@
+---
+title: "EDACap"
+author: "RJ Hazen"
+date: "2024-03-05"
+output: 
+  html_document: 
+    toc: yes
+    number_sections: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+The purpose of this document is to identify how capable an applicant is to repay a loan. Rather than simply look at credit as a predictor, Home Credit Group is striving to identify reliable borrowers with limited or no credit history. I will conduct a simple EDA on the train set that contains the target and will try and identify predictive variables that will produce good results on the test set. Some questions I would like to answer are:
+
+1. Which variables are similar to one another and which should I remove to lower collinearity noise and increase performance of my model?
+2. How is the data quality?
+3. How should I handle missing values in a way that makes sense?
+4. What challenges might arise during modeling?
+5. How should I handle outliers?
+6. Are there external factors that could influence the data?
+
+## Load Libraries & Read Data
+```{r include = FALSE}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(data.table)
+library(tidyverse)
+library(skimr)
+library(rlang)
+data <- read_csv("application_train.csv")
+pre_app <- read_csv('previous_application.csv')
+```
+## Basic Variable Exploration
+```{r}
+table(data$TARGET)
+
+target_distribution <-prop.table(table(data$TARGET))
+print(target_distribution)
+```
+
+It appears that ~92% of the entries belong to the majority class (class 0/Denial) and about 8% belongs to the minority class (class 1/Approval)
+
+```{r}
+majority_class <- names(which.max(target_distribution))
+accuracy_majority_classifier <- max(target_distribution)
+print(accuracy_majority_classifier)
+```
+
+The accuracy for a simple classifier model would be 91.9%. The data is imbalanced.
+
+### Education Type Explortation
+```{r}
+data %>%
+  group_by(NAME_EDUCATION_TYPE, TARGET) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ggplot(aes(x = NAME_EDUCATION_TYPE, y = count, fill = as.factor(TARGET))) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Education Type by Target Class", x = "Education Type", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Secondary/Secondary special is the education type with the largest count of minority class. This is due to the fact that most individuals come from that education type in this dataset.
+
+### Income Type Exploration
+```{r}
+data %>%
+  group_by(NAME_INCOME_TYPE, TARGET) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ggplot(aes(x = NAME_INCOME_TYPE, y = count, fill = as.factor(TARGET))) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Income Type by Target Class", x = "Income Type", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The largest income types are working income type, commercial associate type, pensioner type, and state servant type.
+
+### CorrPlot
+```{r}
+numerical_data <- data %>% select(AMT_INCOME_TOTAL, AMT_CREDIT, AMT_ANNUITY, TARGET)
+
+cor_matrix <- cor(numerical_data, use = "complete.obs")
+
+corrplot(cor_matrix, method = "circle", type = "upper", order = "hclust",
+         tl.col = "black", tl.srt = 45, 
+         title = "Correlation Matrix of Numerical Variables")
+```
+
+It appears there is some possible collinearity between AMT_CREDIT and AMT_ANNUITY. None of these variables seem super predictive of the target variable.Correlation does not imply causation though.
+
+## Missing Values
+```{r}
+#write function to calculate missing value percentage
+calc_missing_percentage <- function(df) {
+  missing_percentage <-sapply(df, function(x) sum(is.na(x))/ length(x) * 100)
+  return (missing_percentage)
+}
+```
+```{r}
+missing_values <- calc_missing_percentage(data)
+missing_values_sorted <- sort(missing_values, decreasing=TRUE)
+print(missing_values_sorted[missing_values_sorted >50])
+```
+
+Here is a list of columns that are missing more than 50% of their values...May consider dropping them upon further evaluation. With columns that have between 30-50% of the data missing, depending on the column, I could impute the missing values if it makes sense.Any columns with lower than 30% missing data, I will retain them.I will also need to figure out a way to check missing data for categorical variables.
+
+## Joining previous application and train datasets
+
+```{r}
+#SetDT function to make large dataset more workable
+previous_app <- as.data.frame(pre_app)
+setDT(previous_app)
+
+```
+```{r}
+#combine dataset including all variables
+combined_df <- merge(data, previous_app, by = "SK_ID_CURR", all.x = TRUE)
+```
+
+## EDA on Combined Dataset
+### Setting Numerics and Removing NA's
+```{r}
+# Replacing missing numeric values with median and categorical with mode
+numeric_cols <- sapply(combined_df, is.numeric)
+categorical_cols <- sapply(combined_df, is.factor) | sapply(combined_df, is.character)
+
+combined_df[numeric_cols] <- lapply(combined_df[numeric_cols], function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+combined_df[categorical_cols] <- lapply(combined_df[categorical_cols], function(x) ifelse(is.na(x), names(sort(table(x), decreasing = TRUE))[1], x))
+```
+
+### Remove duplicate rows
+```{r}
+newdf <- combined_df[!duplicated(combined_df$SK_ID_CURR), ]
+```
+### Descriptive Stats
+```{r}
+# For numerical data
+skim_without_charts(newdf[numeric_cols])
+```
+```{r}
+#For categorical data
+skim_without_charts(newdf[categorical_cols])
+```
+Something I think I am going to want to dive into deeper is the code reject reason feature and see if that has an impact on the target variable and see if we are able to pull anything interesting from that to see what features are most important to the current applications we will be evaluating.
+
+## Visualizations
+
+```{r}
+ggplot(newdf, aes(x = !!sym("DAYS_EMPLOYED"))) + 
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  theme_minimal() + 
+  labs(title = "Distribution of DAYS_EMPLOYED", x = "DAYS_EMPLOYED", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(newdf, aes(x = !!sym("CNT_CHILDREN"))) + 
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  theme_minimal() + 
+  labs(title = "Distribution of CNT_CHILDREN", x = "CNT_CHILDREN", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+From the two previous visualizations, we can see that a majority of applicants are unemployed and do not have children
+
+### Bar charts for select categorical variables
+```{r}
+# For CODE_GENDER
+ggplot(newdf, aes(x = CODE_GENDER)) + 
+  geom_bar(fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of CODE_GENDER", x = "Gender", y = "Count")
+```
+
+A majority of applicants are female
+
+```{r}
+# For FLAG_OWN_CAR
+ggplot(newdf, aes(x = FLAG_OWN_CAR)) + 
+  geom_bar(fill = "lightgreen", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of FLAG_OWN_CAR", x = "Owns a Car", y = "Count")
+
+```
+
+A majority of applicants do not own a car
+
+```{r}
+# For NAME_CONTRACT_TYPE.x
+ggplot(newdf, aes(x = NAME_CONTRACT_TYPE.x)) + 
+  geom_bar(fill = "lightpink", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of NAME_CONTRACT_TYPE.x", x = "Contract Type", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # If labels are overlapping
+
+```
+
+A majority of applicants are applying for cash loans
+
+```{r}
+ggplot(newdf, aes(x = as.factor(TARGET), y = AMT_APPLICATION)) +
+  geom_boxplot() + labs(title = "AMT_APPLICATION by TARGET", x = "TARGET", y = "AMT_APPLICATION")
+```
+
+## Next Steps
+
+From this EDA, I was able to get a basic idea of how the features interact with each other and how the features from the previous application dataset interacts with the target as well. My next steps for this project include communicating with my group and seeing what insights they were able to pull and see if they joined the application train set with a set different from mine. From there, we can communicate and discuss which variables we think are most important. Because this problem is a classification problem, I personally will most likely start modeling with a random forest and move into SVM's or Neural Networks. 
